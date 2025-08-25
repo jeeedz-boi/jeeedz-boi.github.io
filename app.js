@@ -82,12 +82,41 @@
     }
 
     function encodeStateToQuery(stateObj) {
-        return toBase64Url(JSON.stringify(stateObj));
+        // Compact v1 schema: [1, people:[[name,color?],...], items:[[name,priceCents,[personIdx...]],...], discount:[typeFlag,value]]
+        const people = stateObj.people.map(p => [p.name, p.color || null]);
+        const idToIndex = new Map(stateObj.people.map((p, idx) => [p.id, idx]));
+        const items = stateObj.items.map(it => [
+            it.name,
+            Number(it.priceCents) || 0,
+            (it.participantIds || []).map(id => idToIndex.get(id)).filter(i => i >= 0)
+        ]);
+        const discount = stateObj.discount && typeof stateObj.discount === 'object'
+            ? [stateObj.discount.type === 'amount' ? 1 : 0, Number(stateObj.discount.value) || 0]
+            : [0, 0];
+        const compact = [1, people, items, discount];
+        return toBase64Url(JSON.stringify(compact));
     }
     function tryDecodeStateFromQuery(paramValue) {
         try {
             const json = fromBase64Url(paramValue);
             const parsed = JSON.parse(json);
+            // New compact v1 format
+            if (Array.isArray(parsed) && parsed[0] === 1) {
+                const peopleArr = Array.isArray(parsed[1]) ? parsed[1] : [];
+                const itemsArr = Array.isArray(parsed[2]) ? parsed[2] : [];
+                const discountArr = Array.isArray(parsed[3]) ? parsed[3] : [0, 0];
+                const people = peopleArr.map(entry => ({ id: uid(), name: String(entry && entry[0] != null ? entry[0] : ''), color: entry && entry[1] ? entry[1] : undefined }));
+                const items = itemsArr.map(entry => {
+                    const name = String(entry && entry[0] != null ? entry[0] : '');
+                    const priceCents = Number(entry && entry[1]) || 0;
+                    const participantIdxs = Array.isArray(entry && entry[2]) ? entry[2] : [];
+                    const participantIds = participantIdxs.map(i => people[i] && people[i].id).filter(Boolean);
+                    return { id: uid(), name, priceCents, participantIds };
+                });
+                const discount = { type: (discountArr && discountArr[0] === 1) ? 'amount' : 'percent', value: Number(discountArr && discountArr[1]) || 0 };
+                return { people, items, discount };
+            }
+            // Legacy full JSON format
             if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
                 return parsed;
             }
