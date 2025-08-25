@@ -2,8 +2,9 @@
 
 (() => {
     const state = {
-        people: [], // [{ id, name }]
-        items: []   // [{ id, name, priceCents, participantIds: [] }]
+        people: [], // [{ id, name, color }]
+        items: [],  // [{ id, name, priceCents, participantIds: [] }]
+        discount: { type: 'percent', value: 0 } // type: 'percent' | 'amount'; value: number (percent or cents)
     };
 
     const els = {
@@ -52,6 +53,9 @@
             if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
                 state.people = parsed.people;
                 state.items = parsed.items;
+                state.discount = parsed.discount && typeof parsed.discount === 'object'
+                    ? { type: parsed.discount.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.discount.value) || 0 }
+                    : { type: 'percent', value: 0 };
                 ensurePersonColors();
                 resetColorIndexFromState();
             }
@@ -198,6 +202,41 @@
         return sum;
     }
 
+    function applyDiscountToTotals(preTotalsMap) {
+        const entries = state.people.map(p => ({ id: p.id, name: p.name, amount: preTotalsMap[p.id] || 0 }));
+        const sum = entries.reduce((acc, e) => acc + e.amount, 0);
+        if (sum === 0) return { perPerson: Object.fromEntries(entries.map(e => [e.id, 0])), net: 0, discountCents: 0 };
+        let discountCents = 0;
+        if (state.discount.type === 'percent') {
+            const pct = Math.max(0, Math.min(100, Number(state.discount.value) || 0));
+            discountCents = Math.round(sum * (pct / 100));
+        } else {
+            discountCents = Math.max(0, Math.min(sum, Math.round(Number(state.discount.value) || 0)));
+        }
+        const target = sum - discountCents;
+        if (discountCents === 0) return { perPerson: Object.fromEntries(entries.map(e => [e.id, e.amount])), net: sum, discountCents: 0 };
+
+        const factor = target / sum;
+        const adjusted = entries.map(e => ({ id: e.id, raw: e.amount * factor }));
+        const rounded = adjusted.map(a => ({ id: a.id, cents: Math.round(a.raw) }));
+        let totalRounded = rounded.reduce((acc, r) => acc + r.cents, 0);
+        let diff = target - totalRounded;
+        if (diff !== 0) {
+            const order = entries
+                .map((e, idx) => ({ id: e.id, base: e.amount, idx }))
+                .sort((a, b) => b.base - a.base);
+            let i = 0;
+            while (diff !== 0 && order.length > 0) {
+                const id = order[i % order.length].id;
+                const entry = rounded.find(r => r.id === id);
+                entry.cents += diff > 0 ? 1 : -1;
+                diff += diff > 0 ? -1 : 1;
+                i++;
+            }
+        }
+        return { perPerson: Object.fromEntries(rounded.map(r => [r.id, r.cents])), net: target, discountCents };
+    }
+
     // Rendering
     function renderPeople() {
         els.peopleList.innerHTML = '';
@@ -250,10 +289,27 @@
     }
 
     function renderTotalsOnly() {
-        const totalsCents = calculateTotalsCents();
+        const preTotals = calculateTotalsCents();
         const billTotal = calculateBillTotalCents();
+        const { perPerson, net, discountCents } = applyDiscountToTotals(preTotals);
+
+        const controls = `
+            <div class="row" style="grid-column: 1 / -1; gap: 8px; align-items: center;">
+                <span class="pill">Discount</span>
+                <select id="discount-type">
+                    <option value="percent" ${state.discount.type === 'percent' ? 'selected' : ''}>Percent (%)</option>
+                    <option value="amount" ${state.discount.type === 'amount' ? 'selected' : ''}>Amount ($)</option>
+                </select>
+                <input id="discount-value" type="number" min="0" step="0.01" placeholder="0" value="${formatDiscountInputValue(state.discount)}">
+                <span class="spacer"></span>
+                <span class="pill">Items: $${fromCents(billTotal)}</span>
+                <span class="pill">Discount: -$${fromCents(discountCents)}</span>
+                <span class="pill" style="font-weight:700;">Total: $${fromCents(net)}</span>
+            </div>
+        `;
+
         const peopleTotalsHtml = state.people.map(p => {
-            const amount = fromCents(totalsCents[p.id] || 0);
+            const amount = fromCents(perPerson[p.id] || 0);
             return `
                 <div class="total-card">
                     <h3>${escapeHtml(p.name)}</h3>
@@ -261,14 +317,40 @@
                 </div>
             `;
         }).join('');
-        const headerCard = `
-            <div class="total-card" style="grid-column: 1 / -1; display:flex; justify-content: space-between; align-items: center;">
-                <h3 style="margin:0;">Total</h3>
-                <div class="amount">$${fromCents(billTotal)}</div>
-            </div>
-        `;
         const inner = peopleTotalsHtml || '<div class="muted">Add people and items to see totals.</div>';
-        els.totals.innerHTML = `<div class=\"totals-grid\">${headerCard}${inner}</div>`;
+        els.totals.innerHTML = `<div class="totals-grid">${controls}${inner}</div>`;
+
+        const typeSel = document.getElementById('discount-type');
+        const valInput = document.getElementById('discount-value');
+        if (typeSel && valInput) {
+            typeSel.addEventListener('change', () => {
+                const newType = typeSel.value === 'amount' ? 'amount' : 'percent';
+                const raw = Number(valInput.value);
+                if (newType === 'amount') {
+                    state.discount = { type: 'amount', value: Math.round((Number.isFinite(raw) ? raw : 0) * 100) };
+                } else {
+                    state.discount = { type: 'percent', value: Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0)) };
+                }
+                save();
+                renderTotalsOnly();
+            });
+            valInput.addEventListener('input', () => {
+                const raw = Number(valInput.value);
+                if (state.discount.type === 'amount') {
+                    state.discount.value = Math.round((Number.isFinite(raw) ? raw : 0) * 100);
+                } else {
+                    state.discount.value = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0));
+                }
+                save();
+                renderTotalsOnly();
+            });
+        }
+    }
+
+    function formatDiscountInputValue(discount) {
+        if (!discount) return '0';
+        if (discount.type === 'amount') return (Number(discount.value || 0) / 100).toFixed(2);
+        return String(Number(discount.value || 0));
     }
 
     function render() {
@@ -372,6 +454,9 @@
             if (decoded) {
                 state.people = decoded.people;
                 state.items = decoded.items;
+                state.discount = decoded.discount && typeof decoded.discount === 'object'
+                    ? { type: decoded.discount.type === 'amount' ? 'amount' : 'percent', value: Number(decoded.discount.value) || 0 }
+                    : { type: 'percent', value: 0 };
                 ensurePersonColors();
                 resetColorIndexFromState();
                 save();
