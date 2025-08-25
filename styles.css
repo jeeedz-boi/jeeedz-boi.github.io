@@ -76,9 +76,9 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
     font-size: 12px;
 }
 
-.people-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.people-tags { display: flex; gap: 6px; flex-wrap: wrap; max-width: 500px; }
 .person-tag { padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); cursor: pointer; user-select: none; }
-.person-tag.active { background: var(--accent-2); color: #08241d; border-color: transparent; font-weight: 700; }
+.person-tag.active { background: var(--accent-2); color: #08241d; border-color: transparent; font-weight: 700; border-radius: 8px; }
 
 .items .name { flex: 1; }
 .items .price { width: 110px; text-align: right; }
@@ -87,6 +87,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .total-card { background: #0c1430; border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
 .total-card h3 { margin: 0 0 6px; font-size: 16px; }
 .total-card .amount { font-weight: 700; font-size: 20px; color: var(--accent-2); }
+.row-actions { display: flex; gap: 8px; flex-direction: column; }
 
 footer { text-align: center; padding-bottom: 40px; }
 

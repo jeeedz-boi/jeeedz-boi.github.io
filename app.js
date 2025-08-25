@@ -22,6 +22,7 @@
     };
 
     const STORAGE_KEY = 'sharely:v1';
+    const URL_PARAM_KEY = 'd';
 
     function toCents(value) {
         const n = Number(value);
@@ -50,6 +51,39 @@
         } catch (e) {
             console.warn('Failed to parse saved data', e);
         }
+    }
+
+    // Base64url helpers
+    function toBase64Url(str) {
+        const utf8 = new TextEncoder().encode(str);
+        let binary = '';
+        utf8.forEach(b => { binary += String.fromCharCode(b); });
+        const b64 = btoa(binary);
+        return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+    function fromBase64Url(b64url) {
+        const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+        const binary = atob(b64 + pad);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new TextDecoder().decode(bytes);
+    }
+
+    function encodeStateToQuery(stateObj) {
+        return toBase64Url(JSON.stringify(stateObj));
+    }
+    function tryDecodeStateFromQuery(paramValue) {
+        try {
+            const json = fromBase64Url(paramValue);
+            const parsed = JSON.parse(json);
+            if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
+                return parsed;
+            }
+        } catch (_) {
+            // ignore
+        }
+        return null;
     }
 
     function addPerson(name) {
@@ -100,6 +134,27 @@
         if (li) renderItemRow(li, item);
     }
 
+    function assignAllParticipants(itemId) {
+        const item = state.items.find(i => i.id === itemId);
+        if (!item) return;
+        const allIds = state.people.map(p => p.id);
+        item.participantIds = allIds.slice();
+        save();
+        renderTotalsOnly();
+        const li = document.querySelector(`[data-item-id="${itemId}"]`);
+        if (li) renderItemRow(li, item);
+    }
+
+    function unassignAllParticipants(itemId) {
+        const item = state.items.find(i => i.id === itemId);
+        if (!item) return;
+        item.participantIds = [];
+        save();
+        renderTotalsOnly();
+        const li = document.querySelector(`[data-item-id="${itemId}"]`);
+        if (li) renderItemRow(li, item);
+    }
+
     function calculateTotalsCents() {
         const totals = Object.fromEntries(state.people.map(p => [p.id, 0]));
         for (const item of state.items) {
@@ -138,12 +193,18 @@
             <span class="price">$${fromCents(item.priceCents)}</span>
             <span class="spacer"></span>
             <div class="people-tags">${peopleTags}</div>
-            <button class="danger" data-remove-item>Remove</button>
+            <div class="row-actions"> 
+                <button data-assign-all>Assign all</button>
+                <button data-unassign-all>Unassign all</button>
+                <button class="danger" data-remove-item>Remove</button>
+            <div/>
         `;
         // Bind events
         li.querySelectorAll('[data-toggle]').forEach(tag => {
             tag.addEventListener('click', () => toggleParticipant(item.id, tag.getAttribute('data-toggle')));
         });
+        li.querySelector('[data-assign-all]').addEventListener('click', () => assignAllParticipants(item.id));
+        li.querySelector('[data-unassign-all]').addEventListener('click', () => unassignAllParticipants(item.id));
         li.querySelector('[data-remove-item]').addEventListener('click', () => removeItem(item.id));
     }
 
@@ -197,6 +258,17 @@
         a.click();
         URL.revokeObjectURL(url);
     }
+    function exportShareLink() {
+        const params = new URLSearchParams(location.search);
+        params.set(URL_PARAM_KEY, encodeStateToQuery(state));
+        const url = `${location.origin}${location.pathname}?${params.toString()}`;
+        navigator.clipboard.writeText(url).then(() => {
+            alert('Share link copied to clipboard');
+        }, () => {
+            // Fallback: open prompt
+            const ok = prompt('Copy link:', url);
+        });
+    }
     function importJsonFile(file) {
         const reader = new FileReader();
         reader.onload = () => {
@@ -240,6 +312,7 @@
     });
 
     els.resetBtn.addEventListener('click', resetAll);
+    document.getElementById('share-btn').addEventListener('click', exportShareLink);
     els.exportBtn.addEventListener('click', exportJson);
     els.importBtn.addEventListener('click', () => els.importInput.click());
     els.importInput.addEventListener('change', (e) => {
@@ -249,7 +322,27 @@
     });
 
     // Init
-    load();
+    // Load from URL if present, else from localStorage
+    (function initLoad() {
+        const params = new URLSearchParams(location.search);
+        const encoded = params.get(URL_PARAM_KEY);
+        if (encoded) {
+            const decoded = tryDecodeStateFromQuery(encoded);
+            if (decoded) {
+                state.people = decoded.people;
+                state.items = decoded.items;
+                save();
+                // Clean the URL so subsequent reloads don't keep the query param
+                params.delete(URL_PARAM_KEY);
+                const cleanUrl = `${location.origin}${location.pathname}${params.toString() ? '?' + params.toString() : ''}${location.hash}`;
+                history.replaceState(null, '', cleanUrl);
+            } else {
+                load();
+            }
+        } else {
+            load();
+        }
+    })();
     render();
 })();
 
