@@ -192,6 +192,12 @@
         return totals;
     }
 
+    function calculateBillTotalCents() {
+        let sum = 0;
+        for (const item of state.items) sum += item.priceCents || 0;
+        return sum;
+    }
+
     // Rendering
     function renderPeople() {
         els.peopleList.innerHTML = '';
@@ -245,7 +251,8 @@
 
     function renderTotalsOnly() {
         const totalsCents = calculateTotalsCents();
-        const totalHtml = state.people.map(p => {
+        const billTotal = calculateBillTotalCents();
+        const peopleTotalsHtml = state.people.map(p => {
             const amount = fromCents(totalsCents[p.id] || 0);
             return `
                 <div class="total-card">
@@ -254,7 +261,14 @@
                 </div>
             `;
         }).join('');
-        els.totals.innerHTML = `<div class="totals-grid">${totalHtml || '<div class="muted">Add people and items to see totals.</div>'}</div>`;
+        const headerCard = `
+            <div class="total-card" style="grid-column: 1 / -1; display:flex; justify-content: space-between; align-items: center;">
+                <h3 style="margin:0;">Total</h3>
+                <div class="amount">$${fromCents(billTotal)}</div>
+            </div>
+        `;
+        const inner = peopleTotalsHtml || '<div class="muted">Add people and items to see totals.</div>';
+        els.totals.innerHTML = `<div class=\"totals-grid\">${headerCard}${inner}</div>`;
     }
 
     function render() {
