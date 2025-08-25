@@ -23,6 +23,11 @@
 
     const STORAGE_KEY = 'sharely:v1';
     const URL_PARAM_KEY = 'd';
+    const COLOR_PALETTE = [
+        '#6ea8fe', '#59f1c8', '#ffd166', '#f4978e', '#b18cff', '#80ed99',
+        '#f4a261', '#00c2ff', '#ff85a1', '#b8f7d4', '#bde0fe', '#caffbf'
+    ];
+    let nextColorIndex = 0;
 
     function toCents(value) {
         const n = Number(value);
@@ -47,6 +52,8 @@
             if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
                 state.people = parsed.people;
                 state.items = parsed.items;
+                ensurePersonColors();
+                resetColorIndexFromState();
             }
         } catch (e) {
             console.warn('Failed to parse saved data', e);
@@ -91,9 +98,26 @@
         if (!trimmed) return;
         const exists = state.people.some(p => p.name.toLowerCase() === trimmed.toLowerCase());
         if (exists) return;
-        state.people.push({ id: uid(), name: trimmed });
+        state.people.push({ id: uid(), name: trimmed, color: pickNextColor() });
         save();
         render();
+    }
+
+    function pickNextColor() {
+        const color = COLOR_PALETTE[nextColorIndex % COLOR_PALETTE.length];
+        nextColorIndex++;
+        return color;
+    }
+
+    function resetColorIndexFromState() {
+        const count = state.people.filter(p => p && p.color).length;
+        nextColorIndex = count % COLOR_PALETTE.length;
+    }
+
+    function ensurePersonColors() {
+        for (const person of state.people) {
+            if (!person.color) person.color = pickNextColor();
+        }
     }
 
     function removePerson(personId) {
@@ -185,8 +209,9 @@
 
     function renderItemRow(li, item) {
         const peopleTags = state.people.map(p => {
-            const active = item.participantIds.includes(p.id) ? 'active' : '';
-            return `<span class="person-tag ${active}" data-toggle="${p.id}">${escapeHtml(p.name)}</span>`;
+            const isActive = item.participantIds.includes(p.id);
+            const style = isActive ? `style="background:${p.color};color:${getContrastTextColor(p.color)};border-color:transparent;"` : '';
+            return `<span class="person-tag ${isActive ? 'active' : ''}" ${style} data-toggle="${p.id}">${escapeHtml(p.name)}</span>`;
         }).join('');
         li.innerHTML = `
             <span class="name">${escapeHtml(item.name)}</span>
@@ -277,6 +302,8 @@
                 if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
                     state.people = parsed.people;
                     state.items = parsed.items;
+                    ensurePersonColors();
+                    resetColorIndexFromState();
                     save();
                     render();
                 } else {
@@ -331,6 +358,8 @@
             if (decoded) {
                 state.people = decoded.people;
                 state.items = decoded.items;
+                ensurePersonColors();
+                resetColorIndexFromState();
                 save();
                 // Clean the URL so subsequent reloads don't keep the query param
                 params.delete(URL_PARAM_KEY);
@@ -344,6 +373,15 @@
         }
     })();
     render();
+
+    function getContrastTextColor(hex) {
+        const c = hex.replace('#', '').trim();
+        const r = parseInt(c.substring(0, 2), 16);
+        const g = parseInt(c.substring(2, 4), 16);
+        const b = parseInt(c.substring(4, 6), 16);
+        const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+        return yiq >= 160 ? '#08121f' : '#ffffff';
+    }
 })();
 
 
