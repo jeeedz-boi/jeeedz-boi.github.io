@@ -4,7 +4,9 @@
     const state = {
         people: [], // [{ id, name, color }]
         items: [],  // [{ id, name, priceCents, participantIds: [] }]
-        discount: { type: 'percent', value: 0 } // type: 'percent' | 'amount'; value: number (percent or cents)
+        discount: { type: 'percent', value: 0 }, // type: 'percent' | 'amount'; value: number (percent or cents)
+        vat: { type: 'percent', value: 0 }, // type: 'percent' | 'amount'; value: number (percent or cents)
+        serviceCharge: { type: 'percent', value: 0 } // type: 'percent' | 'amount'; value: number (percent or cents)
     };
 
     const els = {
@@ -56,6 +58,12 @@
                 state.discount = parsed.discount && typeof parsed.discount === 'object'
                     ? { type: parsed.discount.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.discount.value) || 0 }
                     : { type: 'percent', value: 0 };
+                state.vat = parsed.vat && typeof parsed.vat === 'object'
+                    ? { type: parsed.vat.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.vat.value) || 0 }
+                    : { type: 'percent', value: 0 };
+                state.serviceCharge = parsed.serviceCharge && typeof parsed.serviceCharge === 'object'
+                    ? { type: parsed.serviceCharge.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.serviceCharge.value) || 0 }
+                    : { type: 'percent', value: 0 };
                 ensurePersonColors();
                 resetColorIndexFromState();
             }
@@ -93,7 +101,13 @@
         const discount = stateObj.discount && typeof stateObj.discount === 'object'
             ? [stateObj.discount.type === 'amount' ? 1 : 0, Number(stateObj.discount.value) || 0]
             : [0, 0];
-        const compact = [1, people, items, discount];
+        const vat = stateObj.vat && typeof stateObj.vat === 'object'
+            ? [stateObj.vat.type === 'amount' ? 1 : 0, Number(stateObj.vat.value) || 0]
+            : [0, 0];
+        const serviceCharge = stateObj.serviceCharge && typeof stateObj.serviceCharge === 'object'
+            ? [stateObj.serviceCharge.type === 'amount' ? 1 : 0, Number(stateObj.serviceCharge.value) || 0]
+            : [0, 0];
+        const compact = [1, people, items, discount, vat, serviceCharge];
         return toBase64Url(JSON.stringify(compact));
     }
     function tryDecodeStateFromQuery(paramValue) {
@@ -105,6 +119,8 @@
                 const peopleArr = Array.isArray(parsed[1]) ? parsed[1] : [];
                 const itemsArr = Array.isArray(parsed[2]) ? parsed[2] : [];
                 const discountArr = Array.isArray(parsed[3]) ? parsed[3] : [0, 0];
+                const vatArr = Array.isArray(parsed[4]) ? parsed[4] : [0, 0];
+                const serviceChargeArr = Array.isArray(parsed[5]) ? parsed[5] : [0, 0];
                 const people = peopleArr.map(entry => ({ id: uid(), name: String(entry && entry[0] != null ? entry[0] : ''), color: entry && entry[1] ? entry[1] : undefined }));
                 const items = itemsArr.map(entry => {
                     const name = String(entry && entry[0] != null ? entry[0] : '');
@@ -114,7 +130,9 @@
                     return { id: uid(), name, priceCents, participantIds };
                 });
                 const discount = { type: (discountArr && discountArr[0] === 1) ? 'amount' : 'percent', value: Number(discountArr && discountArr[1]) || 0 };
-                return { people, items, discount };
+                const vat = { type: (vatArr && vatArr[0] === 1) ? 'amount' : 'percent', value: Number(vatArr && vatArr[1]) || 0 };
+                const serviceCharge = { type: (serviceChargeArr && serviceChargeArr[0] === 1) ? 'amount' : 'percent', value: Number(serviceChargeArr && serviceChargeArr[1]) || 0 };
+                return { people, items, discount, vat, serviceCharge };
             }
             // Legacy full JSON format
             if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
@@ -266,6 +284,57 @@
         return { perPerson: Object.fromEntries(rounded.map(r => [r.id, r.cents])), net: target, discountCents };
     }
 
+    function applyVatAndServiceChargeToTotals(preTotalsMap) {
+        const entries = state.people.map(p => ({ id: p.id, name: p.name, amount: preTotalsMap[p.id] || 0 }));
+        const sum = entries.reduce((acc, e) => acc + e.amount, 0);
+        if (sum === 0) return { perPerson: Object.fromEntries(entries.map(e => [e.id, 0])), net: sum, vatCents: 0, serviceChargeCents: 0 };
+
+        let vatCents = 0;
+        let serviceChargeCents = 0;
+
+        // Calculate VAT
+        if (state.vat.type === 'percent') {
+            const pct = Math.max(0, Math.min(100, Number(state.vat.value) || 0));
+            vatCents = Math.round(sum * (pct / 100));
+        } else {
+            vatCents = Math.max(0, Math.round(Number(state.vat.value) || 0));
+        }
+
+        // Calculate Service Charge
+        if (state.serviceCharge.type === 'percent') {
+            const pct = Math.max(0, Math.min(100, Number(state.serviceCharge.value) || 0));
+            serviceChargeCents = Math.round(sum * (pct / 100));
+        } else {
+            serviceChargeCents = Math.max(0, Math.round(Number(state.serviceCharge.value) || 0));
+        }
+
+        const totalCharges = vatCents + serviceChargeCents;
+        const target = sum + totalCharges;
+
+        if (totalCharges === 0) return { perPerson: Object.fromEntries(entries.map(e => [e.id, e.amount])), net: sum, vatCents: 0, serviceChargeCents: 0 };
+
+        // Distribute charges proportionally based on each person's share
+        const factor = target / sum;
+        const adjusted = entries.map(e => ({ id: e.id, raw: e.amount * factor }));
+        const rounded = adjusted.map(a => ({ id: a.id, cents: Math.round(a.raw) }));
+        let totalRounded = rounded.reduce((acc, r) => acc + r.cents, 0);
+        let diff = target - totalRounded;
+        if (diff !== 0) {
+            const order = entries
+                .map((e, idx) => ({ id: e.id, base: e.amount, idx }))
+                .sort((a, b) => b.base - a.base);
+            let i = 0;
+            while (diff !== 0 && order.length > 0) {
+                const id = order[i % order.length].id;
+                const entry = rounded.find(r => r.id === id);
+                entry.cents += diff > 0 ? 1 : -1;
+                diff += diff > 0 ? -1 : 1;
+                i++;
+            }
+        }
+        return { perPerson: Object.fromEntries(rounded.map(r => [r.id, r.cents])), net: target, vatCents, serviceChargeCents };
+    }
+
     // Rendering
     function renderPeople() {
         els.peopleList.innerHTML = '';
@@ -289,7 +358,7 @@
         }).join('');
         li.innerHTML = `
             <span class="name">${escapeHtml(item.name)}</span>
-            <span class="price">$${fromCents(item.priceCents)}</span>
+            <span class="price">${fromCents(item.priceCents)}</span>
             <span class="spacer"></span>
             <div class="people-tags">${peopleTags}</div>
             <div class="row-actions"> 
@@ -320,29 +389,51 @@
     function renderTotalsOnly() {
         const preTotals = calculateTotalsCents();
         const billTotal = calculateBillTotalCents();
-        const { perPerson, net, discountCents } = applyDiscountToTotals(preTotals);
+        const { perPerson: discountPerPerson, net: discountNet, discountCents } = applyDiscountToTotals(preTotals);
+        const { perPerson: finalPerPerson, net: finalNet, vatCents, serviceChargeCents } = applyVatAndServiceChargeToTotals(discountPerPerson);
 
-        const controls = `
-            <div class="row" style="grid-column: 1 / -1; gap: 8px; align-items: center;">
-                <span class="pill">Discount</span>
-                <select id="discount-type">
-                    <option value="percent" ${state.discount.type === 'percent' ? 'selected' : ''}>Percent (%)</option>
-                    <option value="amount" ${state.discount.type === 'amount' ? 'selected' : ''}>Amount ($)</option>
-                </select>
-                <input id="discount-value" type="number" min="0" step="0.01" placeholder="0" value="${formatDiscountInputValue(state.discount)}">
-                <span class="spacer"></span>
-                <span class="pill">Items: $${fromCents(billTotal)}</span>
-                <span class="pill">Discount: -$${fromCents(discountCents)}</span>
-                <span class="pill" style="font-weight:700;">Total: $${fromCents(net)}</span>
-            </div>
-        `;
+                 const controls = `
+             <div class="row" style="grid-column: 1 / -1; gap: 8px; align-items: center;">
+                 <span class="pill" style="min-width: 120px;">Discount</span>
+                 <select id="discount-type" style="min-width: 100px;">
+                     <option value="percent" ${state.discount.type === 'percent' ? 'selected' : ''}>Percent (%)</option>
+                     <option value="amount" ${state.discount.type === 'amount' ? 'selected' : ''}>Amount</option>
+                 </select>
+                 <input id="discount-value" type="text" placeholder="0" value="${formatDiscountInputValue(state.discount)}" style="min-width: 120px;">
+                 <span class="spacer"></span>
+                 <span class="pill">Items: ${fromCents(billTotal)}</span>
+                 <span class="pill">Discount: -${fromCents(discountCents)}</span>
+                 <span class="pill">Subtotal: ${fromCents(discountNet)}</span>
+             </div>
+             <div class="row" style="grid-column: 1 / -1; gap: 8px; align-items: center;">
+                 <span class="pill" style="min-width: 120px;">VAT</span>
+                 <select id="vat-type" style="min-width: 100px;">
+                     <option value="percent" ${state.vat.type === 'percent' ? 'selected' : ''}>Percent (%)</option>
+                     <option value="amount" ${state.vat.type === 'amount' ? 'selected' : ''}>Amount</option>
+                 </select>
+                 <input id="vat-value" type="text" placeholder="0" value="${formatDiscountInputValue(state.vat)}" style="min-width: 120px;">
+                 <span class="spacer"></span>
+                 <span class="pill">VAT: +${fromCents(vatCents)}</span>
+             </div>
+             <div class="row" style="grid-column: 1 / -1; gap: 8px; align-items: center;">
+                 <span class="pill" style="min-width: 120px;">Service Charge</span>
+                 <select id="service-charge-type" style="min-width: 100px;">
+                     <option value="percent" ${state.serviceCharge.type === 'percent' ? 'selected' : ''}>Percent (%)</option>
+                     <option value="amount" ${state.serviceCharge.type === 'amount' ? 'selected' : ''}>Amount</option>
+                 </select>
+                 <input id="service-charge-value" type="text" placeholder="0" value="${formatDiscountInputValue(state.serviceCharge)}" style="min-width: 120px;">
+                 <span class="spacer"></span>
+                 <span class="pill">Service: +${fromCents(serviceChargeCents)}</span>
+                 <span class="pill" style="font-weight:700;">Total: ${fromCents(finalNet)}</span>
+             </div>
+         `;
 
         const peopleTotalsHtml = state.people.map(p => {
-            const amount = fromCents(perPerson[p.id] || 0);
+            const amount = fromCents(finalPerPerson[p.id] || 0);
             return `
                 <div class="total-card">
                     <h3>${escapeHtml(p.name)}</h3>
-                    <div class="amount">$${amount}</div>
+                    <div class="amount">${amount}</div>
                 </div>
             `;
         }).join('');
@@ -361,7 +452,7 @@
                     state.discount = { type: 'percent', value: Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0)) };
                 }
                 save();
-                renderTotalsOnly();
+                updateTotalsDisplay();
             });
             valInput.addEventListener('input', () => {
                 const raw = Number(valInput.value);
@@ -371,15 +462,104 @@
                     state.discount.value = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0));
                 }
                 save();
-                renderTotalsOnly();
+                updateTotalsDisplay();
+            });
+        }
+
+        // VAT event listeners
+        const vatTypeSel = document.getElementById('vat-type');
+        const vatValInput = document.getElementById('vat-value');
+        if (vatTypeSel && vatValInput) {
+            vatTypeSel.addEventListener('change', () => {
+                const newType = vatTypeSel.value === 'amount' ? 'amount' : 'percent';
+                const raw = Number(vatValInput.value);
+                if (newType === 'amount') {
+                    state.vat = { type: 'amount', value: Math.round((Number.isFinite(raw) ? raw : 0) * 100) };
+                } else {
+                    state.vat = { type: 'percent', value: Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0)) };
+                }
+                save();
+                updateTotalsDisplay();
+            });
+            vatValInput.addEventListener('input', () => {
+                const raw = Number(vatValInput.value);
+                if (state.vat.type === 'amount') {
+                    state.vat.value = Math.round((Number.isFinite(raw) ? raw : 0) * 100);
+                } else {
+                    state.vat.value = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0));
+                }
+                save();
+                updateTotalsDisplay();
+            });
+        }
+
+        // Service Charge event listeners
+        const serviceTypeSel = document.getElementById('service-charge-type');
+        const serviceValInput = document.getElementById('service-charge-value');
+        if (serviceTypeSel && serviceValInput) {
+            serviceTypeSel.addEventListener('change', () => {
+                const newType = serviceTypeSel.value === 'amount' ? 'amount' : 'percent';
+                const raw = Number(serviceValInput.value);
+                if (newType === 'amount') {
+                    state.serviceCharge = { type: 'amount', value: Math.round((Number.isFinite(raw) ? raw : 0) * 100) };
+                } else {
+                    state.serviceCharge = { type: 'percent', value: Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0)) };
+                }
+                save();
+                updateTotalsDisplay();
+            });
+            serviceValInput.addEventListener('input', () => {
+                const raw = Number(serviceValInput.value);
+                if (state.serviceCharge.type === 'amount') {
+                    state.serviceCharge.value = Math.round((Number.isFinite(raw) ? raw : 0) * 100);
+                } else {
+                    state.serviceCharge.value = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0));
+                }
+                save();
+                updateTotalsDisplay();
             });
         }
     }
 
     function formatDiscountInputValue(discount) {
         if (!discount) return '0';
-        if (discount.type === 'amount') return (Number(discount.value || 0) / 100).toFixed(2);
+        if (discount.type === 'amount') return String(Number(discount.value || 0) / 100);
         return String(Number(discount.value || 0));
+    }
+
+    function updateTotalsDisplay() {
+        const preTotals = calculateTotalsCents();
+        const billTotal = calculateBillTotalCents();
+        const { perPerson: discountPerPerson, net: discountNet, discountCents } = applyDiscountToTotals(preTotals);
+        const { perPerson: finalPerPerson, net: finalNet, vatCents, serviceChargeCents } = applyVatAndServiceChargeToTotals(discountPerPerson);
+
+        // Update only the display values without recreating HTML
+        const allPills = document.querySelectorAll('.pill');
+        allPills.forEach(pill => {
+            const text = pill.textContent;
+            if (text.includes('Items:')) {
+                pill.textContent = `Items: ${fromCents(billTotal)}`;
+            } else if (text.includes('Discount:')) {
+                pill.textContent = `Discount: -${fromCents(discountCents)}`;
+            } else if (text.includes('Subtotal:')) {
+                pill.textContent = `Subtotal: ${fromCents(discountNet)}`;
+            } else if (text.includes('VAT:')) {
+                pill.textContent = `VAT: +${fromCents(vatCents)}`;
+            } else if (text.includes('Service:')) {
+                pill.textContent = `Service: +${fromCents(serviceChargeCents)}`;
+            } else if (text.includes('Total:') && !text.includes('Items:') && !text.includes('Discount:') && !text.includes('Subtotal:') && !text.includes('VAT:') && !text.includes('Service:')) {
+                pill.textContent = `Total: ${fromCents(finalNet)}`;
+            }
+        });
+
+        // Update people totals
+        const totalCards = document.querySelectorAll('.total-card .amount');
+        totalCards.forEach((card, index) => {
+            const person = state.people[index];
+            if (person && finalPerPerson[person.id]) {
+                card.textContent = `${fromCents(finalPerPerson[person.id])}`;
+            }
+        });
     }
 
     function render() {
@@ -427,6 +607,15 @@
                 if (parsed && Array.isArray(parsed.people) && Array.isArray(parsed.items)) {
                     state.people = parsed.people;
                     state.items = parsed.items;
+                    if (parsed.discount && typeof parsed.discount === 'object') {
+                        state.discount = { type: parsed.discount.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.discount.value) || 0 };
+                    }
+                    if (parsed.vat && typeof parsed.vat === 'object') {
+                        state.vat = { type: parsed.vat.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.vat.value) || 0 };
+                    }
+                    if (parsed.serviceCharge && typeof parsed.serviceCharge === 'object') {
+                        state.serviceCharge = { type: parsed.serviceCharge.type === 'amount' ? 'amount' : 'percent', value: Number(parsed.serviceCharge.value) || 0 };
+                    }
                     ensurePersonColors();
                     resetColorIndexFromState();
                     save();
@@ -444,6 +633,9 @@
         if (!confirm('Clear all data?')) return;
         state.people = [];
         state.items = [];
+        state.discount = { type: 'percent', value: 0 };
+        state.vat = { type: 'percent', value: 0 };
+        state.serviceCharge = { type: 'percent', value: 0 };
         save();
         render();
     }
@@ -485,6 +677,12 @@
                 state.items = decoded.items;
                 state.discount = decoded.discount && typeof decoded.discount === 'object'
                     ? { type: decoded.discount.type === 'amount' ? 'amount' : 'percent', value: Number(decoded.discount.value) || 0 }
+                    : { type: 'percent', value: 0 };
+                state.vat = decoded.vat && typeof decoded.vat === 'object'
+                    ? { type: decoded.vat.type === 'amount' ? 'amount' : 'percent', value: Number(decoded.vat.value) || 0 }
+                    : { type: 'percent', value: 0 };
+                state.serviceCharge = decoded.serviceCharge && typeof decoded.serviceCharge === 'object'
+                    ? { type: decoded.serviceCharge.type === 'amount' ? 'amount' : 'percent', value: Number(decoded.serviceCharge.value) || 0 }
                     : { type: 'percent', value: 0 };
                 ensurePersonColors();
                 resetColorIndexFromState();
